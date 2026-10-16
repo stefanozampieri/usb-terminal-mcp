@@ -26,30 +26,43 @@ It was built to rescue a headless Ubuntu server that lost Wi-Fi after an automat
 
 If both are connected at once, plug the UART side in first. On some clone boards, two hosts can feed 5V into each other.
 
-## Build and flash
+## Install (no toolchain needed)
 
-With [arduino-cli](https://arduino.github.io/arduino-cli/), the `esp32:esp32` core (3.x) and the `ArduinoJson` (7.x) library:
+1. Open the **[web installer](https://stefanozampieri.github.io/usb-terminal-mcp/)** in Chrome or Edge and plug the board's **UART** port into your computer.
+2. Click **Install** to flash the firmware from the browser.
+3. Enter your Wi-Fi when asked. It's sent to the board over USB ([Improv](https://www.improv-wifi.com/serial/)) and stored only on the board.
+4. Click **Visit device**. The setup page shows the ready-to-paste command for your agent:
+   ```bash
+   claude mcp add --transport http usb-terminal http://<ip>/mcp --header "Authorization: Bearer <token>"
+   ```
+5. Plug the board's **USB-OTG** port into the computer the agent should control.
+
+The access token is generated on the board itself at first boot, so the published firmware contains no secrets. Reserve the board's IP in your router, or use `usb-terminal-XXXX.local`.
+
+### No Chrome, or changing Wi-Fi later
+
+When the board has no working Wi-Fi for 30 s, it opens a setup network called `usb-terminal-XXXX`. Join it from a phone and the setup page opens as a captive portal, where you pick a network and get the agent command. Binaries for other flashers are attached to each [release](https://github.com/stefanozampieri/usb-terminal-mcp/releases) (flash at offset 0).
+
+### The BOOT button
+
+- **Short press:** shows the token on `http://<ip>/setup` for 2 minutes, and prints the agent command on the UART log. The setup page also shows it for 10 minutes after Wi-Fi setup. Otherwise it stays hidden, so being on your LAN isn't enough to read it.
+- **Hold for 5 seconds:** factory reset, which erases the Wi-Fi details, the token and the settings.
+
+## Build it yourself
+
+With [arduino-cli](https://arduino.github.io/arduino-cli/), the `esp32:esp32` core (3.2) and `ArduinoJson` (7.x):
 
 ```bash
-cp esp32kbd/secrets.example.h esp32kbd/secrets.h   # then fill in Wi-Fi + token
 arduino-cli compile --upload -p COM7 \
-  --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,PSRAM=opi" \
-  esp32kbd
+  --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashSize=4M,PartitionScheme=min_spiffs,PSRAM=opi" \
+  firmware
 ```
 
-`USBMode=default` (TinyUSB) is required for the keyboard and serial port. Use `PSRAM=opi` for N8R8/N16R8 boards (1 MB output buffer). Without PSRAM, the buffer falls back to 32 KB.
+- `USBMode=default` (TinyUSB) is required for the keyboard and serial port.
+- `PSRAM=opi` suits N8R8/N16R8 boards and gives a 1 MB output buffer. Use `PSRAM=disabled` on other boards (32 KB buffer).
+- Optional: copy `firmware/secrets.example.h` to `firmware/secrets.h` to bake in Wi-Fi and/or a token. Values there take precedence over what's saved on the board.
 
-The serial log (115200 baud on the UART port) prints the IP address. Send `i` for a status report.
-
-## Connect your agent
-
-Claude Code:
-
-```bash
-claude mcp add --transport http usb-terminal http://<esp-ip>/mcp --header "Authorization: Bearer <MCP_TOKEN>"
-```
-
-Other clients take the same URL and header. Reserve the ESP32's IP in your router so it doesn't change.
+The UART log (115200 baud) prints the IP address and setup hints. Send `i` for a status report.
 
 ## Tools
 
@@ -70,7 +83,7 @@ Other clients take the same URL and header. Reserve the ESP32's IP in your route
 With the console logged in at a shell prompt, the agent calls `attach_terminal`, which types:
 
 ```bash
-D=$(ls /dev/serial/by-id/*ESP32_MCP_Keyboard* | head -n1); sudo chown $USER "$D" && script -qf "$D"
+D=$(ls /dev/serial/by-id/*USB_Terminal* | head -n1); sudo chown $USER "$D" && script -qf "$D"
 ```
 
 From then on, everything in that console session is copied to the ESP32.
@@ -98,8 +111,11 @@ A USB keyboard sends key *positions*, so the firmware must know the target's lay
 ## Security
 
 This is a remote keystroke-injection device, so treat it like a root shell:
-- The bearer token is the only lock. Keep it long, keep it out of git (`secrets.h` is ignored), and rotate it if it leaks.
+- The bearer token is the only lock. If it leaks, hold BOOT for 5 seconds to factory reset, which generates a new token.
 - The MCP endpoint is plain HTTP on your LAN. Don't expose it to the internet.
+- The setup network is open (no password) and only exists while the board has no working Wi-Fi.
+  - On a board that has **never** been configured, anyone who joins it can set the Wi-Fi and will then see the token, so set up new boards right away.
+  - Once a board has been configured, changing its Wi-Fi or seeing its token always takes a BOOT press (physical access), even when it falls back to the setup network.
 - Unplug it when you're done.
 
 ## Limits

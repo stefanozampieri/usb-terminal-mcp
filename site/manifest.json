@@ -1,0 +1,11 @@
+{
+  "name": "USB Terminal MCP",
+  "version": "dev",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [{ "path": "firmware/usb-terminal.bin", "offset": 0 }]
+    }
+  ]
+}

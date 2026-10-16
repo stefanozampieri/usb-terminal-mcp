@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>USB Terminal MCP installer</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"></script>
+  <style>
+    :root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --card: #f4f4f4; --accent: #0b6bcb; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #111; --fg: #e6e6e6; --muted: #999; --card: #1d1d1d; --accent: #5aa9ff; }
+    }
+    body { background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; line-height: 1.55;
+           max-width: 720px; margin: 0 auto; padding: 32px 16px; }
+    h1 { margin-bottom: 0; }
+    .lead { color: var(--muted); margin-top: 4px; }
+    ol > li { margin: 14px 0; }
+    .card { background: var(--card); border-radius: 10px; padding: 16px; margin: 20px 0; }
+    code { background: var(--card); padding: 1px 5px; border-radius: 4px; }
+    a { color: var(--accent); }
+    esp-web-install-button button { font-size: 1em; padding: 10px 18px; border-radius: 8px; border: 0;
+      background: var(--accent); color: #fff; cursor: pointer; margin: 4px 8px 4px 0; }
+    .unsupported { color: #c0392b; }
+  </style>
+</head>
+<body>
+  <h1>USB Terminal MCP</h1>
+  <p class="lead">Turn an ESP32-S3 into a USB keyboard + terminal that AI agents can use on any computer.</p>
+
+  <div class="card">
+    <p><b>You need:</b> an ESP32-S3 board with native USB (e.g. ESP32-S3-DevKitC-1), a USB cable, and Chrome or Edge on a computer.</p>
+  </div>
+
+  <ol>
+    <li>Plug the board's <b>UART</b> (or "COM") USB port into this computer.</li>
+    <li>Pick your board and click <b>Connect</b>, then <b>Install</b>:
+      <div>
+        <esp-web-install-button manifest="manifest-psram.json">
+          <button slot="activate">Install: board with 8 MB PSRAM (N8R8 / N16R8)</button>
+          <span slot="unsupported" class="unsupported">Your browser can't flash devices. Use Chrome or Edge on a computer.</span>
+          <span slot="not-allowed" class="unsupported">This page must be opened over HTTPS.</span>
+        </esp-web-install-button>
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate">Install: other ESP32-S3 boards</button>
+        </esp-web-install-button>
+      </div>
+      <p>Not sure? Look for "R8" in the module's name, or just try the first button. If the board keeps rebooting, use the second.</p>
+    </li>
+    <li>When asked, enter your <b>Wi-Fi</b> (2.4 GHz). It's sent to the board over the USB cable and stored only there.</li>
+    <li>Click <b>Visit device</b>. The setup page shows the command to connect your agent, e.g.
+      <code>claude mcp add --transport http usb-terminal http://&lt;ip&gt;/mcp --header "Authorization: Bearer &lt;token&gt;"</code></li>
+    <li>Plug the board's <b>USB-OTG</b> port into the computer you want the agent to control. Done.</li>
+  </ol>
+
+  <div class="card">
+    <p><b>No Chrome?</b> Flash the <code>.bin</code> from the <a href="https://github.com/stefanozampieri/usb-terminal-mcp/releases">releases</a> with any ESP flasher at offset 0. On first boot, join the <code>usb-terminal-XXXX</code> Wi-Fi network from your phone and the setup page opens.</p>
+    <p><b>On the device:</b> press <b>BOOT</b> to show the access token on the setup page for 2 minutes. Hold it for 5 seconds to factory reset.</p>
+  </div>
+
+  <p><a href="https://github.com/stefanozampieri/usb-terminal-mcp">Source, docs and security notes on GitHub</a></p>
+</body>
+</html>

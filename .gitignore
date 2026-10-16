@@ -1,2 +1,2 @@
-esp32kbd/secrets.h
-build/
+firmware/secrets.h
+build*/

@@ -1,0 +1,74 @@
+name: Build firmware
+
+# Builds the firmware in two variants (with and without octal PSRAM), attaches
+# the binaries to releases (tags v*), and publishes the browser installer in
+# site/ to GitHub Pages from main.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+env:
+  ESP32_INDEX: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core and libraries
+        run: |
+          arduino-cli core update-index --additional-urls "$ESP32_INDEX"
+          arduino-cli core install esp32:esp32@3.2.0 --additional-urls "$ESP32_INDEX"
+          arduino-cli lib install ArduinoJson@7.4.3
+
+      - name: Build
+        run: |
+          set -e
+          # 4 MB flash layout so one image fits every ESP32-S3 board.
+          OPTS="USBMode=default,CDCOnBoot=default,FlashSize=4M,PartitionScheme=min_spiffs"
+          arduino-cli compile --fqbn "esp32:esp32:esp32s3:$OPTS,PSRAM=opi" --build-path build-psram firmware
+          arduino-cli compile --fqbn "esp32:esp32:esp32s3:$OPTS,PSRAM=disabled" --build-path build-plain firmware
+          mkdir -p site/firmware
+          cp build-psram/firmware.ino.merged.bin site/firmware/usb-terminal-psram.bin
+          cp build-plain/firmware.ino.merged.bin site/firmware/usb-terminal.bin
+          VERSION=$(grep -oP 'FW_VERSION = "\K[^"]+' firmware/firmware.ino)
+          sed -i "s/\"version\": \"dev\"/\"version\": \"$VERSION\"/" site/manifest.json site/manifest-psram.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: site/firmware/*.bin
+
+      - name: Attach binaries to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: site/firmware/*.bin
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: site
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

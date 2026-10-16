@@ -3,35 +3,56 @@
 //
 // USB-OTG port  -> the computer to control. It sees a plain USB keyboard and
 //                  a serial port (/dev/ttyACMx) that carries terminal output.
-// USB-UART port -> optional, for flashing and serial logs
+// USB-UART port -> optional, for flashing, Wi-Fi setup and serial logs
 //
 // MCP endpoint: POST http://<ip>/mcp  (Streamable HTTP, JSON responses only)
-// Auth:         Authorization: Bearer <MCP_TOKEN>
+// Auth:         Authorization: Bearer <token generated on first boot>
+//
+// Setup: Wi-Fi comes from the browser installer (Improv serial), from the
+// "usb-terminal-XXXX" setup network the device opens when it has no working
+// Wi-Fi, or from an optional secrets.h baked in at compile time.
 
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <vector>
+#include <esp_mac.h>
 #include "USB.h"
 #include "USBHIDKeyboard.h"
 #include "USBCDC.h"
-#include "secrets.h"
+#if __has_include("secrets.h")
+#include "secrets.h"  // optional compile-time Wi-Fi/token; wins over saved settings
+#endif
 #include "keymap.h"
 #include "terminal.h"
+#include "improv.h"
 
-static const char *FW_VERSION = "2.0.0";
-static const char *HOSTNAME = "esp32kbd";
+static const char *FW_VERSION = "3.0.0";
+static const char *FW_NAME = "USB Terminal MCP";
 static const size_t MAX_TEXT = 5000;            // characters per typed/sent call
 static const size_t LOG_CAPACITY = 1024 * 1024; // terminal output kept in PSRAM
 static const size_t MAX_RETURN = 12000;         // characters of output per tool result
+static const int BOOT_BUTTON = 0;               // GPIO0, the BOOT button on most S3 boards
+static const uint32_t STA_GIVE_UP_MS = 30000;   // open the setup network after this long offline
+static const uint32_t SETUP_WINDOW_MS = 10 * 60 * 1000;  // after provisioning
+static const uint32_t BUTTON_WINDOW_MS = 2 * 60 * 1000;  // after a BOOT press
 
 USBHIDKeyboard Keyboard;
 WebServer server(80);
+DNSServer dns;
 Preferences prefs;
 OutputLog outputLog;
 USBCDC TermSerial;  // the serial port the host sees as /dev/ttyACMx
+
+String deviceName;  // usb-terminal-xxxx: hostname, setup network and mDNS name
+String wifiSsid, wifiPass;
+String mcpToken;
+bool apActive = false;           // the usb-terminal-XXXX setup network is up
+uint32_t lastOnlineMs = 0;       // last time the station had an IP
+uint32_t setupWindowUntil = 0;   // setup page shows the token and accepts changes until then
 
 Layout layout = LAYOUT_US;
 InputMode inputMode = INPUT_KEYBOARD;
@@ -404,7 +425,7 @@ static String attachTerminal() {
   uint64_t start = outputLog.end();
   typeText(
     "export PAGER=cat SYSTEMD_PAGER=cat GIT_PAGER=cat; "
-    "D=$(ls /dev/serial/by-id/*ESP32_MCP_Keyboard* | head -n1); "
+    "D=$(ls /dev/serial/by-id/*USB_Terminal* | head -n1); "
     "sudo chown $USER \"$D\" && script -qf \"$D\"\n",
     keyDelayMs);
   uint32_t t0 = millis();
@@ -454,7 +475,10 @@ static String statusText() {
   s += "key_delay_ms: " + String(keyDelayMs) + "\n";
   s += "terminal_bytes_received: " + String((unsigned long)outputLog.end()) + "\n";
   s += "command_still_running: " + String(pendingId.length() ? "yes" : "no") + "\n";
+  s += "device_name: " + deviceName + "\n";
+  s += "wifi_ssid: " + wifiSsid + "\n";
   s += "wifi_ip: " + WiFi.localIP().toString() + "\n";
+  s += "setup_network_active: " + String(apActive ? "yes" : "no") + "\n";
   s += "wifi_rssi_dbm: " + String(WiFi.RSSI()) + "\n";
   s += "uptime_s: " + String(millis() / 1000);
   return s;
@@ -510,7 +534,7 @@ static const char *TOOLS_JSON = R"JSON([
 },
 {
   "name": "attach_terminal",
-  "description": "Keyboard mode only. Types a one-line command on the console that mirrors the session to the ESP32 serial port (script -qf /dev/serial/by-id/...ESP32_MCP_Keyboard...), after which run_command returns output. The console must be at a logged-in shell prompt. Uses sudo once to get access to the serial port; the user types the password on the machine if asked.",
+  "description": "Keyboard mode only. Types a one-line command on the console that mirrors the session to the ESP32 serial port (script -qf /dev/serial/by-id/...USB_Terminal...), after which run_command returns output. The console must be at a logged-in shell prompt. Uses sudo once to get access to the serial port; the user types the password on the machine if asked.",
   "inputSchema": {"type": "object", "properties": {}}
 },
 {
@@ -659,7 +683,7 @@ static void sendRpcError(JsonVariantConst id, int code, const char *message) {
 }
 
 static bool authorized() {
-  return server.header("Authorization") == String("Bearer ") + MCP_TOKEN;
+  return mcpToken.length() && server.header("Authorization") == "Bearer " + mcpToken;
 }
 
 static void handleMcpPost() {
@@ -686,7 +710,7 @@ static void handleMcpPost() {
     JsonObject r = res["result"].to<JsonObject>();
     r["protocolVersion"] = req["params"]["protocolVersion"] | "2025-06-18";
     r["capabilities"]["tools"].to<JsonObject>();
-    r["serverInfo"]["name"] = HOSTNAME;
+    r["serverInfo"]["name"] = "usb-terminal";
     r["serverInfo"]["version"] = FW_VERSION;
     r["instructions"] = SERVER_INSTRUCTIONS;
   } else if (method == "ping") {
@@ -727,21 +751,287 @@ static void cdcEvent(void *, esp_event_base_t base, int32_t id, void *data) {
 
 static void wifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-    Serial.printf("[wifi] connected, IP %s  ->  http://%s/mcp\n",
-                  WiFi.localIP().toString().c_str(), WiFi.localIP().toString().c_str());
-  } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    Serial.printf("[wifi] connected, IP %s  ->  http://%s/mcp  (setup page: http://%s/setup)\n",
+                  WiFi.localIP().toString().c_str(), WiFi.localIP().toString().c_str(),
+                  WiFi.localIP().toString().c_str());
+  } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED && !apActive) {
     Serial.printf("[wifi] disconnected (reason %u), retrying...\n", info.wifi_sta_disconnected.reason);
   }
 }
 
+// ---------------------------------------------------------------- Wi-Fi and token
+
+static bool online() { return WiFi.status() == WL_CONNECTED; }
+
+static bool setupWindowOpen() { return setupWindowUntil && (int32_t)(setupWindowUntil - millis()) > 0; }
+
+// Changing Wi-Fi reveals the token afterwards, so it needs physical presence
+// (BOOT press or Improv over the UART cable). The only exception is a board
+// that was never configured, so first setup works from a phone.
+static bool canChangeWifi() { return setupWindowOpen() || (apActive && !wifiSsid.length()); }
+
+static String claudeCommand() {
+  return "claude mcp add --transport http usb-terminal http://" + WiFi.localIP().toString() +
+         "/mcp --header \"Authorization: Bearer " + mcpToken + "\"";
+}
+
+// Unlock the setup page (token + Wi-Fi changes) for a while and print the
+// connection details on the UART log, which only someone at the device sees.
+static void openSetupWindow(uint32_t ms) {
+  setupWindowUntil = (millis() + ms) | 1;
+  IPAddress ip = online() ? WiFi.localIP() : WiFi.softAPIP();
+  Serial.printf("[setup] setup page unlocked for %lu s: http://%s/setup\n", (unsigned long)(ms / 1000), ip.toString().c_str());
+  if (online()) Serial.println("[setup] " + claudeCommand());
+}
+
+static void loadNetworkConfig() {
+  prefs.begin("kbd", true);
+  wifiSsid = prefs.getString("ssid", "");
+  wifiPass = prefs.getString("pass", "");
+  mcpToken = prefs.getString("token", "");
+  prefs.end();
+#ifdef WIFI_SSID
+  if (strlen(WIFI_SSID) && strcmp(WIFI_SSID, "YOUR_WIFI_NAME") != 0) {
+    wifiSsid = WIFI_SSID;
+    wifiPass = WIFI_PASS;
+  }
+#endif
+#ifdef MCP_TOKEN
+  if (strlen(MCP_TOKEN) && strcmp(MCP_TOKEN, "CHANGE_ME") != 0) mcpToken = MCP_TOKEN;
+#endif
+}
+
+static void saveWifi() {
+  prefs.begin("kbd", false);
+  prefs.putString("ssid", wifiSsid);
+  prefs.putString("pass", wifiPass);
+  prefs.end();
+}
+
+// Call once the radio is on: the hardware RNG is only truly random then.
+static void ensureToken() {
+  if (mcpToken.length()) return;
+  uint8_t b[24];
+  esp_fill_random(b, sizeof b);
+  char hex[2 * sizeof b + 1];
+  for (size_t i = 0; i < sizeof b; i++) snprintf(hex + 2 * i, 3, "%02x", b[i]);
+  mcpToken = hex;
+  prefs.begin("kbd", false);
+  prefs.putString("token", mcpToken);
+  prefs.end();
+  Serial.println("[setup] generated a new access token");
+}
+
+static void factoryReset() {
+  Serial.println("[setup] factory reset: erasing Wi-Fi, token and settings");
+  prefs.begin("kbd", false);
+  prefs.clear();
+  prefs.end();
+  delay(200);
+  ESP.restart();
+}
+
+static void startSetupNetwork() {
+  if (apActive) return;
+  WiFi.setAutoReconnect(false);  // station retries make the setup network hop channels
+  if (!online()) WiFi.disconnect();
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(deviceName.c_str());
+  dns.start(53, "*", WiFi.softAPIP());
+  apActive = true;
+  Serial.printf("[setup] no Wi-Fi: join the '%s' network and open http://%s/setup\n",
+                deviceName.c_str(), WiFi.softAPIP().toString().c_str());
+}
+
+static void stopSetupNetwork() {
+  if (!apActive) return;
+  dns.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  apActive = false;
+  Serial.println("[setup] Wi-Fi connected, setup network closed");
+}
+
+// Try credentials for up to timeoutMs; the setup network stays up meanwhile.
+static bool tryConnect(const String &ssid, const String &pass, uint32_t timeoutMs) {
+  Serial.printf("[wifi] connecting to '%s'...\n", ssid.c_str());
+  WiFi.disconnect();
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  uint32_t t0 = millis();
+  while (millis() - t0 < timeoutMs && !online()) {
+    waitMs(100);
+    if (apActive) dns.processNextRequest();
+  }
+  return online();
+}
+
+// Used by both Improv and the setup page. On success the new network is
+// saved and the setup page is unlocked so it can show the token.
+static bool provisionWifi(const String &ssid, const String &pass) {
+  if (tryConnect(ssid, pass, 20000)) {
+    wifiSsid = ssid;
+    wifiPass = pass;
+    saveWifi();
+    lastOnlineMs = millis();
+    openSetupWindow(SETUP_WINDOW_MS);
+    return true;
+  }
+  Serial.printf("[wifi] could not connect to '%s'\n", ssid.c_str());
+  if (wifiSsid.length()) WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+  return false;
+}
+
+static void networkLoop() {
+  if (online()) lastOnlineMs = millis();
+  if (apActive) dns.processNextRequest();
+  bool offlineTooLong = !online() && millis() - lastOnlineMs > STA_GIVE_UP_MS;
+  if (!apActive && (!wifiSsid.length() || offlineTooLong)) startSetupNetwork();
+
+  static uint32_t lastCheck = 0, lastRetry = 0;
+  if (apActive && millis() - lastCheck > 5000) {
+    lastCheck = millis();
+    bool clients = WiFi.softAPgetStationNum() > 0;
+    if (online() && !clients) stopSetupNetwork();
+    // Retry the saved network now and then, but not while someone is on the setup page.
+    else if (!online() && wifiSsid.length() && !clients && millis() - lastRetry > 60000) {
+      lastRetry = millis();
+      WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+    }
+  }
+}
+
+// Short press: show the token on the setup page for 2 minutes.
+// Hold 5 seconds: factory reset.
+static void buttonLoop() {
+  static uint32_t downSince = 0;
+  bool down = digitalRead(BOOT_BUTTON) == LOW;
+  if (down && !downSince) downSince = millis() | 1;
+  if (down && millis() - downSince > 5000) factoryReset();
+  if (!down && downSince) {
+    if (millis() - downSince > 50) openSetupWindow(BUTTON_WINDOW_MS);
+    downSince = 0;
+  }
+}
+
+// ---------------------------------------------------------------- Improv
+
+static std::vector<std::vector<String>> scanNetworks() {
+  std::vector<std::vector<String>> nets;
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n && nets.size() < 20; i++) {
+    if (!WiFi.SSID(i).length()) continue;
+    nets.push_back({WiFi.SSID(i), String(WiFi.RSSI(i)), WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "NO" : "YES"});
+  }
+  WiFi.scanDelete();
+  return nets;
+}
+
+improv::Handlers improvHandlers = {
+  provisionWifi,
+  [] { return online(); },
+  [] { return "http://" + WiFi.localIP().toString() + "/setup"; },
+  [] { return std::vector<String>{FW_NAME, FW_VERSION, "ESP32-S3", deviceName}; },
+  scanNetworks,
+};
+improv::Endpoint improvUart(Serial, improvHandlers);
+
+// ---------------------------------------------------------------- setup page
+
+static String htmlEscape(const String &s) {
+  String o;
+  for (char c : s) {
+    if (c == '<') o += "&lt;";
+    else if (c == '>') o += "&gt;";
+    else if (c == '&') o += "&amp;";
+    else if (c == '"') o += "&quot;";
+    else if (c == '\'') o += "&#39;";
+    else o += c;
+  }
+  return o;
+}
+
+static String pageShell(const String &body) {
+  return "<!doctype html><html><head><meta charset=utf-8>"
+         "<meta name=viewport content='width=device-width,initial-scale=1'><title>USB Terminal setup</title>"
+         "<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:2em auto;padding:0 16px;line-height:1.5}"
+         "code,pre{background:#eee;border-radius:4px;padding:2px 4px}pre{padding:10px;white-space:pre-wrap;word-break:break-all}"
+         "input,button{font-size:1em;padding:8px;margin:4px 0;width:100%;box-sizing:border-box}.muted{color:#666}"
+         "@media(prefers-color-scheme:dark){body{background:#111;color:#ddd}code,pre{background:#222}.muted{color:#999}}"
+         "</style></head><body><h1>USB Terminal</h1>" + body + "</body></html>";
+}
+
+static String agentSection() {
+  String ip = WiFi.localIP().toString();
+  if (!setupWindowOpen())
+    return "<p>Press the <b>BOOT</b> button on the device, then reload this page: the access token is shown for 2 minutes.</p>";
+  if (!online()) return "<p>Connect the device to Wi-Fi first; the access details appear here afterwards.</p>";
+  return "<p>Claude Code:</p><pre>" + htmlEscape(claudeCommand()) + "</pre>"
+         "<p>Other MCP clients: URL <code>http://" + ip + "/mcp</code>, header <code>Authorization: Bearer " +
+         mcpToken + "</code></p><p class=muted>Also reachable as " + deviceName +
+         ".local. Reserve this IP in your router so it doesn't change. The token is hidden again in a few minutes; "
+         "press BOOT to show it again.</p>";
+}
+
+static void handleSetupPage() {
+  String b = "<p class=muted>" + deviceName + " &middot; firmware " + FW_VERSION + "</p><h2>Wi-Fi</h2><p>";
+  if (online()) b += "Connected to <b>" + htmlEscape(wifiSsid) + "</b> as <code>" + WiFi.localIP().toString() + "</code>.";
+  else if (wifiSsid.length()) b += "Not connected (saved network: <b>" + htmlEscape(wifiSsid) + "</b>).";
+  else b += "Not configured yet.";
+  b += "</p>";
+  if (!canChangeWifi()) {
+    b += "<p class=muted>Press the BOOT button on the device, then reload, to change the Wi-Fi.</p>";
+  } else {
+    b += "<form method=post action=/setup/wifi><input name=ssid list=nets placeholder='Network name' required>"
+         "<datalist id=nets>";
+    for (const auto &net : scanNetworks()) b += "<option value=\"" + htmlEscape(net[0]) + "\">";
+    b += "</datalist><input name=pass type=password placeholder=Password><button>Connect</button></form>"
+         "<p class=muted>2.4 GHz networks only.</p>";
+  }
+  b += "<h2>Connect your AI agent</h2>" + agentSection();
+  b += "<h2>Reset</h2><p class=muted>Hold BOOT for 5 seconds to erase Wi-Fi, token and settings.</p>";
+  server.send(200, "text/html", pageShell(b));
+}
+
+static void handleSetupWifi() {
+  if (!canChangeWifi()) {
+    server.send(403, "text/html", pageShell("<p>Locked. Press the BOOT button on the device, then try again.</p>"));
+    return;
+  }
+  String ssid = server.arg("ssid");
+  if (!ssid.length()) {
+    server.send(400, "text/html", pageShell("<p>Missing network name. <a href=/setup>Back</a></p>"));
+    return;
+  }
+  if (!provisionWifi(ssid, server.arg("pass"))) {
+    server.send(200, "text/html", pageShell("<p>Could not connect to <b>" + htmlEscape(ssid) +
+                                            "</b>. Check the password and that it's a 2.4 GHz network.</p><p><a href=/setup>Back</a></p>"));
+    return;
+  }
+  String ip = WiFi.localIP().toString();
+  server.send(200, "text/html", pageShell("<p>Connected to <b>" + htmlEscape(ssid) + "</b>. The device is now at <code>" + ip +
+                                          "</code>.</p><h2>Connect your AI agent</h2>" + agentSection() +
+                                          "<p>Back on your normal network, this page is at <a href='http://" + ip + "/setup'>http://" + ip + "/setup</a>.</p>"));
+}
+
+// ---------------------------------------------------------------- main
+
 void setup() {
   Serial.begin(115200);  // UART0 -> the board's USB-UART port
+  pinMode(BOOT_BUTTON, INPUT_PULLUP);
   loadSettings();
+  loadNetworkConfig();
   bool logOk = outputLog.begin(LOG_CAPACITY);
 
+  uint8_t mac[6];
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);
+  char name[24];
+  snprintf(name, sizeof name, "usb-terminal-%02x%02x", mac[4], mac[5]);
+  deviceName = name;
+
   USB.onEvent(usbEvent);
-  USB.manufacturerName("esp32mcpkeyboard");
-  USB.productName("ESP32 MCP Keyboard");
+  USB.manufacturerName("usb-terminal-mcp");
+  USB.productName("USB Terminal");
   Keyboard.begin();
   TermSerial.onEvent(cdcEvent);
   TermSerial.setRxBufferSize(8192);
@@ -750,35 +1040,49 @@ void setup() {
 
   WiFi.onEvent(wifiEvent);
   WiFi.mode(WIFI_STA);
-  WiFi.setHostname(HOSTNAME);
+  WiFi.setHostname(deviceName.c_str());
   WiFi.setSleep(false);  // lower latency for incoming requests
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  MDNS.begin(HOSTNAME);
+  ensureToken();
+  if (wifiSsid.length()) WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+  MDNS.begin(deviceName.c_str());
   MDNS.addService("http", "tcp", 80);
 
   const char *headers[] = {"Authorization"};
   server.collectHeaders(headers, 1);
   server.on("/mcp", HTTP_POST, handleMcpPost);
   server.on("/mcp", HTTP_GET, [] { server.send(405, "text/plain", "SSE stream not supported"); });
-  server.on("/", HTTP_GET, [] { server.send(200, "text/plain", "esp32kbd ok\n"); });
+  server.on("/", HTTP_GET, [] {
+    server.sendHeader("Location", "/setup");
+    server.send(302);
+  });
+  server.on("/setup", HTTP_GET, handleSetupPage);
+  server.on("/setup/wifi", HTTP_POST, handleSetupWifi);
+  // On the setup network every unknown URL leads to the setup page, which
+  // makes phones open it as a captive portal.
+  server.onNotFound([] {
+    if (!apActive) return server.send(404, "text/plain", "not found");
+    server.sendHeader("Location", "http://" + WiFi.softAPIP().toString() + "/setup");
+    server.send(302);
+  });
   server.begin();
 
-  Serial.printf("\n[boot] esp32kbd %s, layout %s, input %s, terminal log %u KB%s, connecting to '%s'...\n",
-                FW_VERSION, layoutName(layout), inputName(inputMode), (unsigned)(outputLog.capacity() / 1024),
-                logOk ? "" : " (ALLOC FAILED)", WIFI_SSID);
+  Serial.printf("\n[boot] %s %s (%s), layout %s, input %s, terminal log %u KB%s\n", FW_NAME, FW_VERSION,
+                deviceName.c_str(), layoutName(layout), inputName(inputMode), (unsigned)(outputLog.capacity() / 1024),
+                logOk ? "" : " (ALLOC FAILED)");
+  if (wifiSsid.length()) Serial.printf("[wifi] connecting to '%s'...\n", wifiSsid.c_str());
+  Serial.println("[setup] press BOOT to show the access token, hold 5 s to factory reset");
 }
 
 void loop() {
   server.handleClient();
   pumpSerial();
+  networkLoop();
+  buttonLoop();
 
-  // Send 'i' on the serial monitor to print status.
-  if (Serial.available() && Serial.read() == 'i') Serial.println(statusText());
-
-  static uint32_t lastReport = 0;
-  if (WiFi.status() != WL_CONNECTED && millis() - lastReport > 10000) {
-    lastReport = millis();
-    Serial.printf("[wifi] still connecting to '%s' (status %d)\n", WIFI_SSID, WiFi.status());
+  // UART: Improv packets from the browser installer; 'i' prints status.
+  while (Serial.available()) {
+    uint8_t b = Serial.read();
+    if (!improvUart.feed(b) && b == 'i') Serial.println(statusText());
   }
 }

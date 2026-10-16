@@ -7,21 +7,21 @@ const [roughPath, fontPath, outPath] = process.argv.slice(2);
 const rough = require(require("path").resolve(roughPath));
 const gen = rough.generator();
 
-const W = 1200, H = 520;
+const W = 1200, TOP = 85, H = 520;
 
-// Colors are tokens mapped to CSS classes so the SVG follows light/dark mode.
-const C = { ink: "#000001", blue: "#000002", orange: "#000003", green: "#000004", soft: "#000005" };
+// Colors are tokens mapped to CSS classes.
+const C = { ink: "#000001", blue: "#000002", orange: "#000003", green: "#000004", soft: "#000005", muted: "#000006" };
 const CLASS = Object.fromEntries(Object.entries(C).map(([k, v]) => [v, k]));
 
 const parts = [];
 let seed = 1;
 
-function draw(drawable) {
+function draw(drawable, extraAttrs = "") {
   for (const p of gen.toPaths(drawable)) {
     const strokeCls = CLASS[p.stroke];
     const fillCls = p.fill && p.fill !== "none" ? CLASS[p.fill] : null;
     const cls = [strokeCls && `s-${strokeCls}`, fillCls && `f-${fillCls}`].filter(Boolean).join(" ");
-    parts.push(`<path d="${p.d}" class="${cls}" stroke-width="${p.strokeWidth}" fill="${fillCls ? "" : "none"}"/>`.replace(' fill=""', ""));
+    parts.push(`<path d="${p.d}" class="${cls}" stroke-width="${p.strokeWidth}"${fillCls ? "" : ' fill="none"'}${extraAttrs}/>`);
   }
 }
 
@@ -32,25 +32,57 @@ function text(x, y, str, { size = 24, cls = "ink", anchor = "middle", weight = 6
   parts.push(`<text x="${x}" y="${y}" font-size="${size}" font-weight="${weight}" text-anchor="${anchor}" class="t-${cls}">${esc}</text>`);
 }
 
-// Curved arrow through a bulge point, with a sketchy head at the end.
+function arrowHead(tip, from, color, width = 2.6) {
+  const a = Math.atan2(tip[1] - from[1], tip[0] - from[0]);
+  const len = 18, spread = 0.45;
+  const l = [tip[0] - len * Math.cos(a - spread), tip[1] - len * Math.sin(a - spread)];
+  const r = [tip[0] - len * Math.cos(a + spread), tip[1] - len * Math.sin(a + spread)];
+  draw(gen.linearPath([l, tip, r], o({ stroke: color, strokeWidth: width })));
+}
+
+// Curved arrow through a bulge point.
 function arrow(from, via, to, color) {
   draw(gen.curve([from, via, to], o({ stroke: color, strokeWidth: 2.6 })));
-  const a = Math.atan2(to[1] - via[1], to[0] - via[0]);
-  const len = 18, spread = 0.45;
-  const l = [to[0] - len * Math.cos(a - spread), to[1] - len * Math.sin(a - spread)];
-  const r = [to[0] - len * Math.cos(a + spread), to[1] - len * Math.sin(a + spread)];
-  draw(gen.linearPath([l, to, r], o({ stroke: color, strokeWidth: 2.6 })));
+  arrowHead(to, via, color);
+}
+
+// Wi-Fi symbol: a dot and three arcs opening upwards.
+function wifi(cx, cy, color) {
+  draw(gen.circle(cx, cy, 11, o({ stroke: color, fill: color, fillStyle: "solid", roughness: 0.6 })));
+  for (const r of [16, 30, 44]) {
+    draw(gen.arc(cx, cy, r * 2, r * 2, -Math.PI * 0.78, -Math.PI * 0.22, false, o({ stroke: color, strokeWidth: 3, roughness: 0.9 })));
+  }
+}
+
+// The USB "trident": trunk with a dot at the base and an arrow tip, one branch
+// ending in a circle, the other in a square.
+function usbSymbol(cx, cy, color) {
+  const s = o({ stroke: color, strokeWidth: 2.6, roughness: 0.7 });
+  draw(gen.line(cx - 34, cy, cx + 26, cy, s));
+  draw(gen.circle(cx - 36, cy, 11, o({ stroke: color, fill: color, fillStyle: "solid", roughness: 0.5 })));
+  draw(gen.polygon([[cx + 24, cy - 8], [cx + 40, cy], [cx + 24, cy + 8]], o({ stroke: color, fill: color, fillStyle: "solid", roughness: 0.5 })));
+  draw(gen.linearPath([[cx - 18, cy], [cx - 6, cy - 14], [cx + 8, cy - 14]], s));
+  draw(gen.circle(cx + 12, cy - 14, 9, o({ stroke: color, strokeWidth: 2.4, roughness: 0.5 })));
+  draw(gen.linearPath([[cx - 4, cy], [cx + 8, cy + 14], [cx + 16, cy + 14]], s));
+  draw(gen.rectangle(cx + 16, cy + 10, 9, 9, o({ stroke: color, fill: color, fillStyle: "solid", roughness: 0.5 })));
 }
 
 // ---- AI agent: a laptop
 draw(gen.rectangle(50, 120, 240, 150, o({ fill: C.blue, fillStyle: "hachure", hachureGap: 9, fillWeight: 1 })));
 draw(gen.rectangle(62, 132, 216, 126, o({ fill: C.soft, fillStyle: "solid", roughness: 0.6 })));
 draw(gen.polygon([[30, 270], [310, 270], [334, 298], [6, 298]], o()));
-text(170, 168, "Claude Code", { size: 30, weight: 700 });
+text(170, 168, "coding agent", { size: 30, weight: 700 });
 text(170, 205, 'run_command("df -h")', { size: 24, cls: "blue" });
 text(170, 240, "→ exit 0 · 37% used", { size: 24, cls: "orange" });
 text(170, 342, "AI agent", { size: 36, weight: 700 });
-text(170, 370, "Claude Code or any MCP client", { size: 22, cls: "muted", weight: 500 });
+text(170, 370, "Claude Code, Codex… any MCP client", { size: 22, cls: "muted", weight: 500 });
+
+// ---- Wi-Fi link between the agent and the ESP32
+arrow([318, 175], [412, 138], [500, 205], C.blue);
+text(410, 120, "MCP over Wi-Fi", { size: 26, cls: "blue", weight: 700 });
+wifi(412, 262, C.blue);
+arrow([500, 282], [412, 322], [326, 262], C.orange);
+text(415, 350, "output + exit code", { size: 24, cls: "orange", weight: 700 });
 
 // ---- ESP32-S3 board
 draw(gen.rectangle(510, 190, 180, 110, o({ fill: C.green, fillStyle: "hachure", hachureGap: 8, fillWeight: 1.2 })));
@@ -60,38 +92,42 @@ for (let i = 0; i < 5; i++) {
   draw(gen.line(575 + i * 11, 275, 575 + i * 11, 285, o({ strokeWidth: 1.6, roughness: 0.8 })));
 }
 draw(gen.linearPath([[522, 205], [532, 205], [532, 225], [542, 225], [542, 205], [552, 205]], o({ strokeWidth: 1.8 })));
-draw(gen.rectangle(686, 225, 18, 22, o({ fill: C.ink, fillStyle: "solid" })));
-draw(gen.rectangle(686, 258, 18, 22, o({ fill: C.ink, fillStyle: "solid" })));
-for (const r of [22, 38, 54]) draw(gen.arc(600, 178, r * 2, r * 2, -Math.PI * 0.78, -Math.PI * 0.22, false, o({ stroke: C.blue, strokeWidth: 2.4 })));
+draw(gen.rectangle(684, 236, 20, 26, o({ fill: C.ink, fillStyle: "solid" })));
 text(600, 345, "ESP32-S3", { size: 36, weight: 700 });
 text(600, 373, "~€8 · tiny MCP server", { size: 22, cls: "muted", weight: 500 });
 
-// ---- Target computer: a monitor
-draw(gen.rectangle(880, 100, 280, 190, o()));
-draw(gen.rectangle(892, 112, 256, 166, o({ fill: C.soft, fillStyle: "solid", roughness: 0.6 })));
-draw(gen.line(1020, 290, 1020, 318, o({ strokeWidth: 3 })));
-draw(gen.line(965, 320, 1075, 320, o({ strokeWidth: 3 })));
-text(905, 148, "$ df -h", { size: 24, anchor: "start", cls: "blue" });
-text(905, 180, "Filesystem   Size  Use%", { size: 22, anchor: "start", weight: 500 });
-text(905, 208, "/dev/sda1    936G   37%", { size: 22, anchor: "start", weight: 500 });
-text(905, 248, "$ _", { size: 24, anchor: "start" });
-text(1020, 360, "Your server / PC", { size: 36, weight: 700 });
-text(1020, 388, "BIOS · login · shell · no network needed", { size: 22, cls: "muted", weight: 500 });
+// ---- USB cable from the ESP32 to the server
+draw(gen.curve([[704, 249], [760, 246], [815, 268], [856, 272]], o({ strokeWidth: 7, roughness: 0.5, bowing: 0.5 })));
+draw(gen.rectangle(850, 262, 26, 20, o({ fill: C.ink, fillStyle: "solid", roughness: 0.6 })));
+text(788, 168, "USB keyboard →", { size: 24, cls: "blue", weight: 700 });
+text(788, 190, "types the command", { size: 21, cls: "blue", weight: 500 });
+usbSymbol(786, 222, C.ink);
+text(788, 312, "← USB serial", { size: 24, cls: "orange", weight: 700 });
+text(788, 334, "output comes back", { size: 21, cls: "orange", weight: 500 });
 
-// ---- Arrows
-arrow([318, 175], [412, 150], [500, 210], C.blue);
-text(410, 132, "MCP over Wi-Fi", { size: 26, cls: "blue", weight: 700 });
+// ---- Headless server, with an optional screen on top
+draw(gen.rectangle(876, 232, 296, 88, o({ fill: C.soft, fillStyle: "solid", roughness: 1 })));
+draw(gen.rectangle(876, 232, 296, 88, o()));
+for (let row = 0; row < 2; row++) {
+  for (let i = 0; i < 4; i++) {
+    draw(gen.rectangle(892 + i * 40, 248 + row * 30, 32, 18, o({ strokeWidth: 1.6, roughness: 0.9 })));
+    draw(gen.line(898 + i * 40, 257 + row * 30, 916 + i * 40, 257 + row * 30, o({ strokeWidth: 1.4, roughness: 0.6 })));
+  }
+}
+for (let i = 0; i < 4; i++) draw(gen.line(1062, 254 + i * 9, 1130, 254 + i * 9, o({ stroke: C.muted, strokeWidth: 1.6, roughness: 0.8 })));
+draw(gen.circle(1150, 256, 10, o({ stroke: C.green, fill: C.green, fillStyle: "solid", roughness: 0.4 })));
+draw(gen.circle(1150, 278, 10, o({ stroke: C.green, fill: C.green, fillStyle: "solid", roughness: 0.4 })));
+draw(gen.circle(1150, 302, 14, o({ strokeWidth: 1.8, roughness: 0.6 })));
 
-arrow([712, 232], [792, 214], [868, 202], C.blue);
-text(790, 164, "USB keyboard", { size: 24, cls: "blue", weight: 700 });
-text(790, 186, "types the command", { size: 21, cls: "blue", weight: 500 });
+const dashed = ' stroke-dasharray="9 7"';
+draw(gen.rectangle(950, 100, 172, 110, o({ stroke: C.muted, roughness: 0.9 })), dashed);
+draw(gen.line(1036, 210, 1036, 232, o({ stroke: C.muted, strokeWidth: 2.4, roughness: 0.5 })), dashed);
+text(966, 138, "$ df -h", { size: 24, anchor: "start", cls: "blue" });
+text(966, 166, "/dev/sda1  37%", { size: 22, anchor: "start", weight: 500 });
+text(1036, 196, "screen optional", { size: 19, cls: "muted", weight: 500 });
 
-arrow([868, 262], [792, 284], [712, 268], C.orange);
-text(790, 312, "USB serial", { size: 24, cls: "orange", weight: 700 });
-text(790, 334, "output comes back", { size: 21, cls: "orange", weight: 500 });
-
-arrow([500, 282], [412, 318], [326, 262], C.orange);
-text(415, 346, "output + exit code", { size: 24, cls: "orange", weight: 700 });
+text(1024, 362, "Your server / PC", { size: 36, weight: 700 });
+text(1024, 390, "headless is fine · BIOS · login · shell", { size: 22, cls: "muted", weight: 500 });
 
 // ---- Caption
 draw(gen.line(330, 438, 870, 438, o({ stroke: C.blue, strokeWidth: 1.6, roughness: 2 })));
@@ -99,19 +135,16 @@ text(600, 474, "One USB cable. Nothing to install on the target.", { size: 34, w
 text(600, 505, "Works where SSH can't: no network, broken drivers, boot menus.", { size: 22, cls: "muted", weight: 500 });
 
 const font = fs.readFileSync(fontPath).toString("base64");
-const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 85 ${W} ${H - 85}" width="${W}" height="${H - 85}" role="img" aria-label="An AI agent sends a command over Wi-Fi (MCP) to an ESP32-S3, which types it on the target computer as a USB keyboard; the output comes back over USB serial and returns to the agent with the exit code.">
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 ${TOP} ${W} ${H - TOP}" width="${W}" height="${H - TOP}" role="img" aria-label="An AI coding agent sends a command over Wi-Fi (MCP) to an ESP32-S3. The ESP32 is plugged into a server with a USB cable: it types the command as a USB keyboard, and the output comes back over USB serial to the agent with the exit code.">
 <style>
 @font-face{font-family:"Caveat";src:url(data:font/woff2;base64,${font}) format("woff2");font-weight:500 700}
 text{white-space:pre;font-family:Caveat,"Segoe Print","Comic Sans MS",cursive}
 path{stroke-linecap:round;stroke-linejoin:round}
-.s-ink{stroke:#1e1e1e}.s-blue{stroke:#1971c2}.s-orange{stroke:#e8590c}.s-green{stroke:#2f9e44}.s-soft{stroke:none}
-.f-ink{fill:#1e1e1e}.f-blue{fill:#1971c2}.f-orange{fill:#e8590c}.f-green{fill:#2f9e44}.f-soft{fill:#f1f3f5}
+.s-ink{stroke:#1e1e1e}.s-blue{stroke:#1971c2}.s-orange{stroke:#e8590c}.s-green{stroke:#2f9e44}.s-soft{stroke:none}.s-muted{stroke:#868e96}
+.f-ink{fill:#1e1e1e}.f-blue{fill:#1971c2}.f-orange{fill:#e8590c}.f-green{fill:#2f9e44}.f-soft{fill:#f1f3f5}.f-muted{fill:#868e96}
 .t-ink{fill:#1e1e1e}.t-blue{fill:#1971c2}.t-orange{fill:#e8590c}.t-muted{fill:#6b6b6b}
-@media (prefers-color-scheme:dark){
-.s-ink{stroke:#e9ecef}.s-blue{stroke:#74c0fc}.s-orange{stroke:#ffa94d}.s-green{stroke:#69db7c}
-.f-ink{fill:#e9ecef}.f-blue{fill:#74c0fc}.f-orange{fill:#ffa94d}.f-green{fill:#69db7c}.f-soft{fill:#25262b}
-.t-ink{fill:#e9ecef}.t-blue{fill:#74c0fc}.t-orange{fill:#ffa94d}.t-muted{fill:#a6a7ab}}
 </style>
+<rect x="0" y="${TOP}" width="${W}" height="${H - TOP}" fill="#ffffff"/>
 ${parts.join("\n")}
 </svg>
 `;

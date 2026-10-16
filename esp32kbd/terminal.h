@@ -90,7 +90,14 @@ inline String cleanTerminal(const String &in) {
       continue;
     }
     if (c == '\r') {
-      if (i + 1 < len && in[i + 1] == '\n') continue;
+      // A run of \r before \n is just a line ending (a tty's onlcr turns the
+      // pty's \r\n into \r\r\n); only a \r followed by text rewrites the line.
+      size_t j = i;
+      while (j < len && in[j] == '\r') j++;
+      if (j < len && in[j] == '\n') {
+        i = j - 1;
+        continue;
+      }
       out.remove(lineStart);
       continue;
     }

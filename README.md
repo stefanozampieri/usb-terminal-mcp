@@ -110,4 +110,7 @@ This is a remote keystroke-injection device, so treat it like a root shell:
 
 ## Status
 
-The keyboard path has been used in practice: it diagnosed and fixed the server described above. The terminal path (`run_command`, mirror and serial console) is new and hasn't been field-tested yet.
+Tested on Ubuntu 24.04 (kernel 6.8) on an ESP32-S3 N16R8:
+- The keyboard path diagnosed and fixed the server described above.
+- In keyboard + mirror mode, `run_command`, `terminal_read`, multi-line commands, timeouts and exit codes all work.
+- Serial-console mode hasn't been field-tested yet.

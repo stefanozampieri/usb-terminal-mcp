@@ -130,3 +130,12 @@ Tested on Ubuntu 24.04 (kernel 6.8) on an ESP32-S3 N16R8:
 - The keyboard path diagnosed and fixed the server described above.
 - In keyboard + mirror mode, `run_command`, `terminal_read`, multi-line commands, timeouts and exit codes all work.
 - Serial-console mode hasn't been field-tested yet.
+
+## Credits
+
+Credits go to [openwakeword.com](https://openwakeword.com), where this project was made.
+
+## License
+
+[MIT](LICENSE): free to use, modify and share, including commercially. Keep the copyright notice, which credits
+[openwakeword.com](https://openwakeword.com), in any copy or substantial portion of the code.

@@ -2,6 +2,8 @@
 
 Give an AI agent a terminal on any computer, through a single USB cable and no software on the target.
 
+![An AI agent sends a command over Wi-Fi to an ESP32-S3, which types it on the target computer as a USB keyboard; the output comes back over USB serial.](docs/how-it-works.svg)
+
 An ESP32-S3 plugs into the target computer and shows up as two ordinary USB devices:
 
 - a **keyboard**, so the agent can type anywhere: BIOS, boot menu, login prompt, a shell;
@@ -10,12 +12,6 @@ An ESP32-S3 plugs into the target computer and shows up as two ordinary USB devi
 The ESP32 joins your Wi-Fi and runs a small [MCP](https://modelcontextprotocol.io) server, so Claude Code (or any MCP client) can call `run_command("journalctl -b -p err")` and get the output and exit code back.
 
 It was built to rescue a headless Ubuntu server that lost Wi-Fi after an automatic kernel update. In that situation SSH and remote-desktop tools don't work, but a USB keyboard always does.
-
-```
- AI agent ──MCP over Wi-Fi──▶ ESP32-S3 ──USB keyboard──▶ target computer
-                                  ▲                            │
-                                  └───USB serial (output)──────┘
-```
 
 ## Hardware
 
